@@ -14,7 +14,7 @@ MAX_SEQ_NUM = 7     # Número máximo de sequência (para janela de 8, 0 a 7, M=
 
 # --- Probabilidades de Simulação de Erros/Perdas ---
 LOSS_PROBABILITY = 0.2     # 20% de chance de um quadro de dados ser "perdido" (não enviado)
-ERROR_PROBABILITY = 0.1    # 10% de chance de um quadro de dados ser "corrompido"
+ERROR_PROBABILITY = 0.2    # 20% de chance de um quadro de dados ser "corrompido"
 ACK_LOSS_PROBABILITY = 0.3 # 30% de chance de um ACK ser "perdido" (não enviado)
 
 # --- Classe para Representar um Quadro (Frame) ---

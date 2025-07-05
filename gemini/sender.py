@@ -2,6 +2,7 @@ import socket
 import threading
 import time
 import collections
+import json
 
 from utils import (
     HOST, PORT, BUFFER_SIZE, WINDOW_SIZE, TIMEOUT, MAX_SEQ_NUM,
@@ -98,19 +99,11 @@ def seq_add(seq, val):
     return (seq + val) % (MAX_SEQ_NUM + 1)
 
 def seq_greater_equal(s1, s2):
-    """Verifica se s1 >= s2 considerando o wraparound."""
-    # S1 é maior ou igual a S2 se eles estiverem na mesma "metade" do círculo
-    # e S1 estiver à frente de S2, ou se S1 estiver na metade inicial e S2 na final
-    # (indicando que S1 "passou" por S2 no wraparound)
-    if s1 == s2:
-        return True
-    
-    # Caso 1: Ambos os números estão próximos
-    if abs(s1 - s2) <= MAX_SEQ_NUM / 2:
-        return s1 > s2
-    
-    # Caso 2: Houve wraparound
-    return s1 < s2
+    """Retorna True se s1 >= s2 considerando wraparound."""
+    # Considera o espaço de sequência circular
+    diff = (s1 - s2 + MAX_SEQ_NUM + 1) % (MAX_SEQ_NUM + 1)
+    # Se diff == 0, são iguais; se diff < metade do espaço, s1 está à frente de s2
+    return diff == 0 or diff < ((MAX_SEQ_NUM + 1) // 2)
 
 
 def listen_for_acks():
@@ -148,59 +141,14 @@ def listen_for_acks():
                 with lock:
                     print(f"[SENDER] Received ACK: {received_frame}")
 
-                    # Se o ACK for para o próximo quadro esperado (expected_ack)
-                    # ou para um quadro posterior, significa que ele confirmou
-                    # todos os quadros até ack_num.
-                    # No Go-Back-N, um ACK N significa que o receptor está
-                    # esperando o quadro N, confirmando N-1 e todos os anteriores.
-                    # Ou seja, o ACK é para o próximo quadro a ser RECEBIDO.
-                    # Se o ACK é para N, significa que N-1 foi o último recebido com sucesso.
-                    
-                    # Logica para Go-Back-N: o ACK é cumulativo.
-                    # O ACK N confirma que todos os quadros até N-1 foram recebidos.
-                    # Portanto, a janela base avança para N.
-                    
-                    # Verifica se o ACK recebido é válido e avança a janela
-                    # (o ACK é para expected_ack, ou seja, ack_num = expected_ack)
-                    # Ou um ACK para um número de sequência maior, o que significa que
-                    # o receptor já recebeu quadros além do esperado.
-                    # Isso é importante para lidar com ACKs duplicados ou fora de ordem
-                    # que podem ocorrer devido a retransmissões.
-                    
-                    # A janela desliza até o ack_num (que é o próximo esperado)
-                    # Então, todos os quadros até (ack_num - 1) são confirmados.
-
-                    # Para Go-Back-N, 'expected_ack' é o próximo seq_num que o *remetente*
-                    # espera que o *receptor* envie um ACK para (ou seja, o próximo frame que
-                    # o remetente vai enviar, e o receptor está esperando receber).
-                    
-                    # O ACK que vem do receptor é o *próximo* quadro de DADOS que ele está esperando.
-                    # Ou seja, se o receptor envia ACK(5), ele recebeu 4 e está esperando 5.
-                    # Portanto, todos os quadros até 4 estão confirmados. Nossa janela pode avançar para 5.
-
-                    while True:
-                        # Verifica se o ACK confirma o quadro atual da base da janela
-                        # seq_add(expected_ack, 0) == expected_ack
-                        # Este loop é necessário se o ACK recebido for para um quadro
-                        # muito à frente, confirmando múltiplos quadros.
-                        if seq_greater_equal(ack_num, expected_ack):
-                            if expected_ack in send_buffer:
-                                stop_timer(expected_ack)
-                                del send_buffer[expected_ack]
-                                print(f"[SENDER] Janela base avançou para {seq_add(expected_ack, 1)}. Removido {expected_ack} do buffer.")
-                            expected_ack = seq_add(expected_ack, 1) # Avança a base da janela
-                            
-                            if expected_ack == ack_num: # Chegou ao ACK recebido
-                                break
-                        else:
-                            # ACK inesperado (talvez um ACK duplicado para algo já confirmado)
-                            # Ou ACK para um quadro que já está fora da janela
-                            print(f"[SENDER] ACK inesperado recebido: {ack_num}. Esperado: {expected_ack}. Ignorando.")
-                            break # Sai do loop se o ACK não estiver na frente da janela esperada
-                    
-                    # Se todos os quadros da janela foram confirmados, não há timers rodando
-                    # Se não, o timer do quadro mais antigo não confirmado ainda deve estar rodando.
-                    # Se um timer expira para 'expected_ack', ele retransmite de 'expected_ack'
+                    # Go-Back-N: ACK N confirma até N-1
+                    # Remove todos os quadros do buffer até (mas não incluindo) ack_num
+                    while expected_ack != ack_num:
+                        if expected_ack in send_buffer:
+                            stop_timer(expected_ack)
+                            del send_buffer[expected_ack]
+                            print(f"[SENDER] Janela base avançou para {seq_add(expected_ack, 1)}. Removido {expected_ack} do buffer.")
+                        expected_ack = seq_add(expected_ack, 1)
             else:
                 print(f"[SENDER] Received unexpected frame type: {received_frame.frame_type}")
 
@@ -210,7 +158,6 @@ def listen_for_acks():
             print("[SENDER] Conexão com o receptor perdida.")
             running = False
         except socket.timeout:
-            # Este timeout é para recv, não para os timers dos quadros
             pass
         except Exception as e:
             print(f"[SENDER ERROR] An error occurred in ACK listener: {e}")
@@ -219,28 +166,8 @@ def listen_for_acks():
 def main_sender():
     global sender_socket, sequence_number, running
 
-    message = (
-        "Este é um exemplo de mensagem longa a ser enviada usando Go-Back-N. "
-        "Os quadros serão divididos e enviados um por um. "
-        "Vamos testar a resiliência do protocolo contra perdas e erros. "
-        "Cada pedaço desta mensagem se tornará um quadro, e o sistema "
-        "lidará com quaisquer problemas de transmissão que ocorram. "
-        "Espero que o receptor consiga remontar tudo corretamente! "
-        "Esta é a segunda parte da mensagem, com mais informações para testar "
-        "a capacidade de recuperação. Se houver falhas, o Go-Back-N "
-        "deverá garantir que todos os dados cheguem, mesmo que demore mais. "
-        "A integridade dos dados é crucial, por isso o CRC entra em cena. "
-        "Terceira parte: estamos enviando dados adicionais para garantir "
-        "que o buffer do transmissor e do receptor sejam bem utilizados. "
-        "A janela deslizante permite o envio de múltiplos quadros sem ACK imediato, "
-        "melhorando a eficiência, mas exigindo retransmissões em cascata "
-        "se um quadro for perdido. Quarta parte: continuar testando a robustez "
-        "com mais texto. Quanto mais texto, maior a chance de erros ou perdas "
-        "simuladas ocorrerem, e podemos observar o protocolo em ação. "
-        "Isso demonstra como a camada de enlace garante a confiabilidade "
-        "sobre um canal não confiável. Última parte da mensagem: "
-        "Concluímos o envio e esperamos a confirmação final. "
-        "Obrigado por acompanhar a demonstração!")
+    with open("message.txt", "r", encoding="utf-8") as f:
+        message = f.read()
     
     # Divide a mensagem em pedaços (quadros)
     chunk_size = BUFFER_SIZE // 2 # Cada quadro terá metade do tamanho do buffer de rede para deixar espaço para o cabeçalho
