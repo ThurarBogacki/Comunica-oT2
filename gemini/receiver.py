@@ -44,6 +44,8 @@ def send_ack(conn, ack_num):
 def main_receiver():
     global receiver_socket, client_conn, client_addr, expected_seq_num, running
 
+    last_accepted_seq = None  # Adicione esta linha para controlar o último seq_num aceito
+
     receiver_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     receiver_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Permite reuso do endereço
     receiver_socket.settimeout(1) # Timeout para accept()
@@ -85,25 +87,23 @@ def main_receiver():
                     print(f"[RECEIVER] Received: {received_frame}")
 
                     # --- Verificação de CRC ---
-                    # Para verificar o CRC, precisamos dos dados originais
-                    # Sem o CRC anexo no JSON, ou seja, 'data'.
-                    # Se o frame.data for corrompido, o cálculo do CRC será diferente.
-                    # Convertemos de volta para bytes para o CRC.
                     data_for_crc_check = received_frame.data.encode('utf-8')
                     
                     if not verify_crc8(data_for_crc_check, received_frame.crc):
                         print(f"[RECEIVER] ERRO DE CRC detectado no Quadro {received_frame.seq_num}. Descartando.")
-                        # Não envia ACK para quadro com erro de CRC
-                        # E reenvia o ACK para o expected_seq_num (para ajudar o sender a retransmitir)
                         send_ack(client_conn, expected_seq_num)
-                        continue # Pula para a próxima iteração do loop
+                        continue
 
                     # --- Controle de Fluxo (Go-Back-N) ---
                     if received_frame.seq_num == expected_seq_num:
-                        print(f"[RECEIVER] Quadro {received_frame.seq_num} recebido em ordem. Aceitando.")
-                        received_message.append(received_frame.data)
-                        expected_seq_num = seq_add(expected_seq_num, 1) # Avança o esperado
-                        send_ack(client_conn, expected_seq_num) # Envia ACK para o próximo esperado
+                        if last_accepted_seq != expected_seq_num:
+                            print(f"[RECEIVER] Quadro {received_frame.seq_num} recebido em ordem. Aceitando.")
+                            received_message.append(received_frame.data)
+                            last_accepted_seq = expected_seq_num
+                        else:
+                            print(f"[RECEIVER] Quadro {received_frame.seq_num} duplicado. Ignorando.")
+                        expected_seq_num = seq_add(expected_seq_num, 1)
+                        send_ack(client_conn, expected_seq_num)
                     else:
                         # Quadro fora de ordem (número de sequência diferente do esperado)
                         # No Go-Back-N, descartamos quadros fora de ordem e retransmitimos o último ACK.
