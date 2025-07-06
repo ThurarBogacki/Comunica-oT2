@@ -4,7 +4,7 @@ import time
 # --- Constantes de Rede ---
 HOST = '127.0.0.1'  # Endereço IP do localhost
 PORT = 12345        # Porta para o receptor escutar e o transmissor conectar
-BUFFER_SIZE = 256  # Tamanho do buffer para receber dados (ajustar conforme necessário)
+BUFFER_SIZE = 1024  # Tamanho do buffer para receber dados (ajustar conforme necessário)
 
 # --- Constantes de Protocolo ---
 WINDOW_SIZE = 4     # Tamanho da janela Go-Back-N

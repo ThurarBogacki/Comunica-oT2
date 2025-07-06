@@ -2,7 +2,6 @@ import socket
 import threading
 import json
 import time
-import json
 
 from utils import (
     HOST, PORT, BUFFER_SIZE, MAX_SEQ_NUM,

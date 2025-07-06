@@ -3,7 +3,6 @@ import threading
 import time
 import collections
 import json
-import json
 
 from utils import (
     HOST, PORT, BUFFER_SIZE, WINDOW_SIZE, TIMEOUT, MAX_SEQ_NUM,
@@ -112,41 +111,29 @@ def listen_for_acks():
     Thread para escutar por ACKs do receptor.
     """
     global expected_ack, running
-    
-    # Define um timeout para recv() para que a thread possa verificar 'running' periodicamente.
-    sender_socket.settimeout(0.5) 
-
     while running:
         try:
-            # Tenta ler o tamanho do quadro (10 bytes)
+            # Lê o tamanho do próximo quadro
             len_bytes = sender_socket.recv(10)
-            
-            # Se não recebeu bytes, pode ser que o receptor fechou a conexão
             if not len_bytes:
-                print("[SENDER] Receptor desconectou ou enviou dados incompletos.")
+                print("[SENDER] Receptor desconectou.")
                 running = False
                 break
             
-            # Converte o tamanho do quadro para int
             frame_len = int(len_bytes.decode('utf-8').strip())
             
-            # Lê o quadro completo com base no tamanho informado
+            # Lê o quadro completo
             frame_bytes = b''
-            bytes_read = 0
-            while bytes_read < frame_len:
-                # Recebe pedaços do quadro até que o tamanho total seja atingido
-                packet = sender_socket.recv(min(frame_len - bytes_read, BUFFER_SIZE))
+            while len(frame_bytes) < frame_len:
+                packet = sender_socket.recv(min(frame_len - len(frame_bytes), BUFFER_SIZE))
                 if not packet:
                     print("[SENDER] Receptor desconectou durante leitura do quadro.")
                     running = False
                     break
                 frame_bytes += packet
-                bytes_read += len(packet)
             
-            # Se a flag 'running' mudou durante a leitura de bytes, sair
             if not running: break
 
-            # Desserializa o quadro recebido para um objeto Frame
             received_frame = Frame.from_json(frame_bytes.decode('utf-8'))
 
             if received_frame.frame_type == 'ACK':
@@ -165,21 +152,16 @@ def listen_for_acks():
             else:
                 print(f"[SENDER] Received unexpected frame type: {received_frame.frame_type}")
 
-        except socket.timeout:
-            # Se o recv() atingir o timeout, esta exceção é levantada.
-            # A thread continua no loop 'while running', verificando a flag 'running'.
-            pass 
         except json.JSONDecodeError:
-            print("[SENDER ERROR] Falha ao decodificar JSON dos dados recebidos. Quadro possivelmente corrompido ou dados incompletos.")
+            print("[SENDER ERROR] Failed to decode JSON from received data.")
         except ConnectionResetError:
             print("[SENDER] Conexão com o receptor perdida.")
             running = False
         except socket.timeout:
             pass
         except Exception as e:
-            print(f"[SENDER ERROR] Ocorreu um erro inesperado na escuta de ACKs: {e}")
+            print(f"[SENDER ERROR] An error occurred in ACK listener: {e}")
             running = False
-            
 
 def main_sender():
     global sender_socket, sequence_number, running
@@ -190,9 +172,7 @@ def main_sender():
     # Divide a mensagem em pedaços (quadros)
     chunk_size = BUFFER_SIZE // 2 # Cada quadro terá metade do tamanho do buffer de rede para deixar espaço para o cabeçalho
     message_chunks = [message[i:i + chunk_size] for i in range(0, len(message), chunk_size)]
-    # Adicione esta linha para imprimir o total de quadros
-    print(f"[SENDER] Total de quadros a enviar: {len(message_chunks)}")
-
+    
     sender_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sender_socket.settimeout(1) # Timeout para operações de socket (recv, accept)
 
