@@ -3,6 +3,7 @@ import threading
 import time
 import collections
 import json
+import json
 
 from utils import (
     HOST, PORT, BUFFER_SIZE, WINDOW_SIZE, TIMEOUT, MAX_SEQ_NUM,
@@ -99,22 +100,12 @@ def seq_add(seq, val):
     return (seq + val) % (MAX_SEQ_NUM + 1)
 
 def seq_greater_equal(s1, s2):
-    """Verifica se s1 >= s2 considerando o wraparound."""
-    # S1 é maior ou igual a S2 se eles estiverem na mesma "metade" do círculo
-    # e S1 estiver à frente de S2, ou se S1 estiver na metade inicial e S2 na final
-    # (indicando que S1 "passou" por S2 no wraparound)
-    if s1 == s2:
-        return True
-    
-    # Caso 1: Ambos os números estão próximos
-    if abs(s1 - s2) <= MAX_SEQ_NUM / 2:
-        return s1 > s2
-    
-    # Caso 2: Houve wraparound
-    return s1 < s2
+    """Retorna True se s1 >= s2 considerando wraparound."""
+    # Considera o espaço de sequência circular
+    diff = (s1 - s2 + MAX_SEQ_NUM + 1) % (MAX_SEQ_NUM + 1)
+    # Se diff == 0, são iguais; se diff < metade do espaço, s1 está à frente de s2
+    return diff == 0 or diff < ((MAX_SEQ_NUM + 1) // 2)
 
-
-# Em sender.py, dentro da função listen_for_acks():
 
 def listen_for_acks():
     """
@@ -159,50 +150,19 @@ def listen_for_acks():
             received_frame = Frame.from_json(frame_bytes.decode('utf-8'))
 
             if received_frame.frame_type == 'ACK':
-                ack_num = received_frame.seq_num # Este é o próximo quadro que o RECEPTOR espera
-                
-                with lock: # Protege o acesso às variáveis globais compartilhadas
-                    print(f"\n[SENDER] Received ACK: {received_frame}")
-                    print(f"  [SENDER DEBUG] Antes do processamento: expected_ack={expected_ack}, ack_num_recebido={ack_num}")
-                    print(f"  [SENDER DEBUG] send_buffer antes: {list(send_buffer.keys())}")
+                ack_num = received_frame.seq_num
+                with lock:
+                    print(f"[SENDER] Received ACK: {received_frame}")
 
-                    # --- Lógica de AVANÇO da Janela Go-Back-N no Transmissor ---
-                    # A base da janela (expected_ack) só deve avançar se o ack_num recebido
-                    # indicar um NOVO progresso (ou seja, ack_num > expected_ack, considerando wraparound).
-                    # Se ack_num == expected_ack, é um ACK duplicado ou reconfirmação da base atual; não há avanço.
-                    
-                    if seq_greater_equal(ack_num, expected_ack) and ack_num != expected_ack:
-                        # Limpa os quadros do buffer e para seus timers.
-                        # Percorre do 'expected_ack' antigo até o 'ack_num' recebido (não inclusivo).
-                        current_seq_to_clear = expected_ack
-                        while current_seq_to_clear != ack_num:
-                            if current_seq_to_clear in send_buffer:
-                                stop_timer(current_seq_to_clear) 
-                                del send_buffer[current_seq_to_clear]
-                                print(f"  [SENDER DEBUG] Removido quadro {current_seq_to_clear} do buffer.")
-                            current_seq_to_clear = seq_add(current_seq_to_clear, 1)
-                        
-                        # Atualiza a base da janela do transmissor para o ack_num recebido.
-                        print(f"  [SENDER DEBUG] Janela base (expected_ack) avançou de {expected_ack} para {ack_num}.")
-                        expected_ack = ack_num
-                        
-                        # Se o buffer de envio agora está vazio, todos os quadros foram reconhecidos.
-                        # Paramos quaisquer timers restantes para garantir uma saída limpa.
-                        if not send_buffer and any(timers.values()):
-                            print("[SENDER DEBUG] Buffer vazio. Parando todos os timers restantes.")
-                            for timer_seq in list(timers.keys()):
-                                stop_timer(timer_seq)
-
-                    else:
-                        # ACK duplicado (ack_num == expected_ack) ou ACK antigo (ack_num < expected_ack).
-                        # Não causa avanço na janela, mas pode reconfirmar a necessidade de retransmissão
-                        # se a base da janela estiver travada.
-                        print(f"  [SENDER DEBUG] ACK {ack_num} é re-ACK/duplicado/antigo. Esperado para avanço: > {expected_ack}. Ignorando avanço.")
-                    
-                    print(f"  [SENDER DEBUG] send_buffer depois: {list(send_buffer.keys())}")
-                    print(f"  [SENDER DEBUG] Novo expected_ack (base): {expected_ack}")
-
-            else: # Se o tipo de quadro não for ACK, imprime e ignora
+                    # Go-Back-N: ACK N confirma até N-1
+                    # Remove todos os quadros do buffer até (mas não incluindo) ack_num
+                    while expected_ack != ack_num:
+                        if expected_ack in send_buffer:
+                            stop_timer(expected_ack)
+                            del send_buffer[expected_ack]
+                            print(f"[SENDER] Janela base avançou para {seq_add(expected_ack, 1)}. Removido {expected_ack} do buffer.")
+                        expected_ack = seq_add(expected_ack, 1)
+            else:
                 print(f"[SENDER] Received unexpected frame type: {received_frame.frame_type}")
 
         except socket.timeout:
@@ -214,7 +174,8 @@ def listen_for_acks():
         except ConnectionResetError:
             print("[SENDER] Conexão com o receptor perdida.")
             running = False
-            break
+        except socket.timeout:
+            pass
         except Exception as e:
             print(f"[SENDER ERROR] Ocorreu um erro inesperado na escuta de ACKs: {e}")
             running = False
@@ -223,28 +184,8 @@ def listen_for_acks():
 def main_sender():
     global sender_socket, sequence_number, running
 
-    message = (
-        "Este é um exemplo de mensagem longa a ser enviada usando Go-Back-N. "
-        "Os quadros serão divididos e enviados um por um. "
-        "Vamos testar a resiliência do protocolo contra perdas e erros. "
-        "Cada pedaço desta mensagem se tornará um quadro, e o sistema "
-        "lidará com quaisquer problemas de transmissão que ocorram. "
-        "Espero que o receptor consiga remontar tudo corretamente! "
-        "Esta é a segunda parte da mensagem, com mais informações para testar "
-        "a capacidade de recuperação. Se houver falhas, o Go-Back-N "
-        "deverá garantir que todos os dados cheguem, mesmo que demore mais. "
-        "A integridade dos dados é crucial, por isso o CRC entra em cena. "
-        "Terceira parte: estamos enviando dados adicionais para garantir "
-        "que o buffer do transmissor e do receptor sejam bem utilizados. "
-        "A janela deslizante permite o envio de múltiplos quadros sem ACK imediato, "
-        "melhorando a eficiência, mas exigindo retransmissões em cascata "
-        "se um quadro for perdido. Quarta parte: continuar testando a robustez "
-        "com mais texto. Quanto mais texto, maior a chance de erros ou perdas "
-        "simuladas ocorrerem, e podemos observar o protocolo em ação. "
-        "Isso demonstra como a camada de enlace garante a confiabilidade "
-        "sobre um canal não confiável. Última parte da mensagem: "
-        "Concluímos o envio e esperamos a confirmação final. "
-        "Obrigado por acompanhar a demonstração!")
+    with open("message.txt", "r", encoding="utf-8") as f:
+        message = f.read()
     
     # Divide a mensagem em pedaços (quadros)
     chunk_size = BUFFER_SIZE // 2 # Cada quadro terá metade do tamanho do buffer de rede para deixar espaço para o cabeçalho
